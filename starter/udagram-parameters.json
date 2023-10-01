@@ -1,6 +1,14 @@
 [
 	{
-		"ParameterKey": "Add you parameters here",
-		"ParameterValue": "Add you parameters here"
+		"ParameterKey": "EnvironmentName",
+		"ParameterValue": "Udagram"
+	},
+	{
+		"ParameterKey": "MyIPAddress",
+		"ParameterValue": "146.120.248.0/32"
+	},
+	{
+		"ParameterKey": "BucketName",
+		"ParameterValue": "udacity-udagram-bucket-20042005"
 	}
 ]

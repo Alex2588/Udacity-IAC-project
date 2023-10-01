@@ -1,11 +1,54 @@
 Description: CD12352 - Infrastructure as Code Project - Udagram
 
 Parameters:
-  # Add your parameters here
+  EnvironmentName:
+    Description: An Environment name that will be prefixed to resources
+    Type: String
+
+  MyIPAddress:
+    Description: An IP address of my local computer
+    Type: String
+
+  BucketName:
+    Description: An S3 bucket name
+    Type: String
 
 Resources:
-  # Add your resources here
-  # We include a portion of the LaunchTemplate resource so you can use the UserData.
+  LoadBalancerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http access to the load balancer
+      VpcId: 
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  WebServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http access to the private servers from the load balancer security group
+      VpcId: 
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: !Ref LoadBalancerSecGroup
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        SourceSecurityGroupId: !Ref BastionSecurityGroup
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+
   WebAppLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties: 
@@ -16,3 +59,185 @@ Resources:
             apt-get update -y
             sudo apt-get install nginx -y
             service nginx start
+            echo "<html><head></head><body><h2>It works! Udagram, Udacity</h2></body></html>" > /var/www/html/index.html
+        ImageId: ami-053b0d53c279acc90
+        KeyName: !Ref MyKeyPair
+        SecurityGroupIds:
+          - !Ref WebServerSecGroup
+        InstanceType: t3.small
+        IamInstanceProfile:
+          Name: !Ref InstanceProfile
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '20'
+    
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: 
+          !Sub "${EnvironmentName}-PRIV-NETS"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebAppLaunchTemplate
+        Version: !GetAtt WebAppLaunchTemplate.LatestVersionNumber
+      MinSize: '2'
+      DesiredCapacity: '2'
+      MaxSize: '4'
+      TargetGroupARNs:
+      - Ref: WebAppTargetGroup
+
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+  WebAppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-NET"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-NET"
+      SecurityGroups:
+      - Ref: LoadBalancerSecGroup
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: WebAppTargetGroup
+      LoadBalancerArn:
+        Ref: WebAppLoadBalancer
+      Port: '80'
+      Protocol: HTTP
+
+  ALBListenerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: forward
+          TargetGroupArn: !Ref WebAppTargetGroup
+        Conditions:
+        - Field: path-pattern
+          Values: [/]
+        ListenerArn: !Ref 'Listener'
+        Priority: 1
+
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+      
+  S3BucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Join [ '', [ 'arn:aws:s3:::', !Ref S3Bucket, '/*' ]]
+
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref EnvironmentName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'ec2.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: S3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 
+                - 's3:GetObject'
+                - 's3:PutObject'
+                Resource:
+                  - !GetAtt S3Bucket.Arn
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+      - !Ref IAMRole
+
+  MyKeyPair:
+    Type: 'AWS::EC2::KeyPair'
+    Properties:
+      KeyName: MyKeyPair
+
+  BastionHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-053b0d53c279acc90
+      KeyName: !Ref MyKeyPair
+      InstanceType: t2.micro
+      SubnetId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-PUB1-NET"
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      SecurityGroupIds:
+      - Ref: BastionSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-bastion
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: 
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      GroupDescription: Security group for a bastion host
+      SecurityGroupIngress:
+        - CidrIp: !Ref MyIPAddress
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+      Tags:
+      - Key: Name
+        Value: !Sub ${EnvironmentName}-bastion-sg
+
+Outputs:
+  LoadBalancerDNS:
+    Value: !Join [ "", [ 'http://', !GetAtt WebAppLoadBalancer.DNSName ]]
+    Export:
+      Name: !Sub "${EnvironmentName}-DNS-URL"
